@@ -639,19 +639,7 @@ pub async fn copy_item_and_paste_from_popup(app: tauri::AppHandle, id: i64) -> R
 pub fn get_macos_accessibility_status() -> bool {
     #[cfg(target_os = "macos")]
     {
-        use cocoa::base::nil;
-        use objc::{class, msg_send, sel, sel_impl};
-        unsafe {
-            let options: cocoa::base::id = msg_send![class!(NSDictionary), dictionary];
-            let trusted: bool = msg_send![
-                class!(AXSystem),
-                AXIsProcessTrustedWithOptions: options
-            ];
-            // AXIsProcessTrustedWithOptions is a C function, not an Objective-C method.
-            // Using standard macOS API via extern "C":
-            let _ = trusted;
-            is_process_trusted_macos()
-        }
+        is_process_trusted_macos()
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -672,7 +660,7 @@ fn is_process_trusted_macos() -> bool {
 pub fn open_macos_accessibility_settings() {
     #[cfg(target_os = "macos")]
     {
-        use cocoa::base::{id, nil, YES};
+        use cocoa::base::{id, nil};
         use cocoa::foundation::NSString;
         use objc::{class, msg_send, sel, sel_impl};
         unsafe {
@@ -777,7 +765,7 @@ fn set_clipboard_payload(app: &tauri::AppHandle, content_type: &str, raw: &str) 
 
 #[cfg(target_os = "macos")]
 fn activate_app_macos(bundle_id: &str) -> Result<(), String> {
-    use cocoa::base::{id, nil, YES};
+    use cocoa::base::{id, nil};
     use cocoa::foundation::NSString;
     use objc::{class, msg_send, sel, sel_impl};
 
