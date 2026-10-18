@@ -15,9 +15,11 @@
 //! Two guards close that off: debug builds never register themselves, and every
 //! release launch re-points a stale entry at the current executable.
 
-use tauri::{AppHandle, Manager};
+#[cfg(desktop)]
 use tauri_plugin_autostart::ManagerExt;
+use tauri::{AppHandle, Manager};
 
+#[cfg(desktop)]
 use crate::startup_trace;
 
 /// Passed by the startup entry so a login launch goes straight to the tray
@@ -32,6 +34,7 @@ pub fn launched_hidden() -> bool {
 /// Creates the startup entry when it is missing and rewrites it when it no
 /// longer points at this build. No-op on debug builds, which must never claim
 /// the user's login — see the module docs.
+#[cfg(desktop)]
 pub fn sync(app: &AppHandle) {
     if cfg!(debug_assertions) {
         startup_trace("autostart: debug build, startup entry left untouched");
@@ -68,10 +71,16 @@ pub fn sync(app: &AppHandle) {
     }
 }
 
+#[cfg(mobile)]
+pub fn sync(_app: &AppHandle) {
+    // Autostart is a desktop-only concept
+}
+
 /// True only when the entry is readable *and* demonstrably wrong: it names a
 /// different binary, or predates [`HIDDEN_FLAG`]. An entry we cannot read or
 /// cannot compare against is left alone, so no layout we did not anticipate can
 /// put the app into a rewrite-every-launch loop.
+#[cfg(desktop)]
 fn entry_is_stale(app: &AppHandle) -> bool {
     let Some(entry) = read_entry(app) else {
         return false;
@@ -88,6 +97,7 @@ fn entry_is_stale(app: &AppHandle) -> bool {
 /// the canonicalized executable path count as a match, because the plugin writes
 /// the raw path on Linux and the canonical one on macOS — comparing against only
 /// one of them would make a symlinked install look permanently stale.
+#[cfg(desktop)]
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 fn target_paths(app: &AppHandle) -> Vec<String> {
     #[cfg(target_os = "linux")]

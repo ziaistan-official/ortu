@@ -9,15 +9,11 @@
   "permissions": [
     "core:default",
     "opener:default",
-    "global-shortcut:default",
-    "positioner:default",
     "dialog:default",
     "dialog:allow-save",
     "dialog:allow-open",
     "dialog:allow-message",
-    "autostart:default",
     "log:default",
-    "updater:default",
     "process:default"
   ]
 }

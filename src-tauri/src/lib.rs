@@ -14,12 +14,15 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
-use sysinfo::System;
 use tauri::Emitter;
 use tauri::Manager;
+#[cfg(desktop)]
 use tauri::menu::{Menu, MenuItem};
+#[cfg(desktop)]
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, WebviewUrl, WebviewWindowBuilder};
+
+#[cfg(desktop)]
 use tauri_plugin_global_shortcut::{Shortcut, ShortcutState};
 
 #[cfg(target_os = "windows")]
@@ -52,7 +55,10 @@ pub struct PasteStack(pub Mutex<Vec<i64>>);
 
 /// Maps currently-registered global shortcuts to their action id so the global
 /// handler can dispatch. Rebuilt whenever shortcuts change.
+#[cfg(desktop)]
 pub struct ShortcutMap(pub Mutex<HashMap<Shortcut, String>>);
+#[cfg(mobile)]
+pub struct ShortcutMap(pub Mutex<HashMap<String, String>>);
 
 /// Tracks whether the current UI theme is dark so the native titlebar can be
 /// re-applied (e.g. when the hidden main window is shown again) without the
@@ -93,6 +99,7 @@ pub fn accelerator_for(app: &AppHandle, action: &str) -> String {
 /// (Re)registers all global shortcuts from current settings and rebuilds the
 /// action lookup map. Returns the list of actions that failed to register
 /// (e.g. invalid or already taken by another app).
+#[cfg(desktop)]
 pub fn register_global_shortcuts(app: &AppHandle) -> Vec<String> {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
@@ -129,6 +136,11 @@ pub fn register_global_shortcuts(app: &AppHandle) -> Vec<String> {
     failed
 }
 
+#[cfg(mobile)]
+pub fn register_global_shortcuts(_app: &AppHandle) -> Vec<String> {
+    Vec::new()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_panic_hook();
@@ -138,59 +150,59 @@ pub fn run() {
 
     let mut builder = tauri::Builder::default();
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "android")]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_main_window(app);
-        }));
+        builder = builder.plugin(tauri_plugin_clipboard_manager::init());
     }
 
     #[cfg(desktop)]
     {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }));
         builder = builder
             .plugin(tauri_plugin_updater::Builder::new().build())
-            .plugin(tauri_plugin_process::init());
+            .plugin(tauri_plugin_process::init())
+            .plugin(tauri_plugin_positioner::init())
+            .plugin(tauri_plugin_autostart::init(
+                tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                // Login launches start in the tray; `setup` reads the flag back.
+                Some(vec![autostart::HIDDEN_FLAG]),
+            ))
+            .plugin(
+                tauri_plugin_global_shortcut::Builder::new()
+                    .with_handler(|app, s, e| {
+                        if e.state != ShortcutState::Pressed {
+                            return;
+                        }
+                        // Look up which action this pressed shortcut maps to.
+                        let action = app
+                            .try_state::<ShortcutMap>()
+                            .and_then(|m| m.0.lock().ok().and_then(|g| g.get(s).cloned()));
+
+                        match action.as_deref() {
+                            Some("open_popup") => toggle_popup(app),
+                            Some("paste_stack") => {
+                                // Paste the next item from the paste stack into the
+                                // current frontmost app.
+                                let app = app.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let _ = commands::paste_next_from_stack(app).await;
+                                });
+                            }
+                            Some("copy_stack") => {
+                                // Copy the current selection straight into the paste stack.
+                                let app = app.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let _ = commands::copy_selection_to_stack(app).await;
+                                });
+                            }
+                            _ => {}
+                        }
+                    })
+                    .build(),
+            );
     }
-
-    builder = builder
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            // Login launches start in the tray; `setup` reads the flag back.
-            Some(vec![autostart::HIDDEN_FLAG]),
-        ))
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, s, e| {
-                    if e.state != ShortcutState::Pressed {
-                        return;
-                    }
-                    // Look up which action this pressed shortcut maps to.
-                    let action = app
-                        .try_state::<ShortcutMap>()
-                        .and_then(|m| m.0.lock().ok().and_then(|g| g.get(s).cloned()));
-
-                    match action.as_deref() {
-                        Some("open_popup") => toggle_popup(app),
-                        Some("paste_stack") => {
-                            // Paste the next item from the paste stack into the
-                            // current frontmost app.
-                            let app = app.clone();
-                            tauri::async_runtime::spawn(async move {
-                                let _ = commands::paste_next_from_stack(app).await;
-                            });
-                        }
-                        Some("copy_stack") => {
-                            // Copy the current selection straight into the paste stack.
-                            let app = app.clone();
-                            tauri::async_runtime::spawn(async move {
-                                let _ = commands::copy_selection_to_stack(app).await;
-                            });
-                        }
-                        _ => {}
-                    }
-                })
-                .build(),
-        );
 
     builder
         .setup(|app| {
@@ -257,31 +269,37 @@ pub fn run() {
             }
 
             // ---------------- TRAY ----------------
-            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+            #[cfg(desktop)]
+            let tray_enabled = {
+                let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+                let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
 
-            let tray_enabled = if let Some(icon) = app.default_window_icon().cloned() {
-                match TrayIconBuilder::new()
-                    .icon(icon)
-                    .menu(&menu)
-                    .on_menu_event(|app: &tauri::AppHandle, event| match event.id.as_ref() {
-                        "quit" => app.exit(0),
-                        "show" => show_main_window(app),
-                        _ => {}
-                    })
-                    .build(app)
-                {
-                    Ok(_) => true,
-                    Err(e) => {
-                        log::error!("Tray icon initialization failed: {}", e);
-                        false
+                if let Some(icon) = app.default_window_icon().cloned() {
+                    match TrayIconBuilder::new()
+                        .icon(icon)
+                        .menu(&menu)
+                        .on_menu_event(|app: &tauri::AppHandle, event| match event.id.as_ref() {
+                            "quit" => app.exit(0),
+                            "show" => show_main_window(app),
+                            _ => {}
+                        })
+                        .build(app)
+                    {
+                        Ok(_) => true,
+                        Err(e) => {
+                            log::error!("Tray icon initialization failed: {}", e);
+                            false
+                        }
                     }
+                } else {
+                    log::warn!("Default window icon missing; skipping tray icon initialization.");
+                    false
                 }
-            } else {
-                log::warn!("Default window icon missing; skipping tray icon initialization.");
-                false
             };
+
+            #[cfg(mobile)]
+            let tray_enabled = false;
 
             // A hidden launch reaches the app through the tray. With no tray
             // there is no way in, so show the window rather than boot into
@@ -340,7 +358,6 @@ pub fn run() {
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
         .invoke_handler(tauri::generate_handler![
@@ -484,7 +501,10 @@ pub(crate) fn startup_trace(message: &str) {
 
 fn current_boot_session_id() -> String {
     // Stable across app restarts, changes on OS reboot.
-    format!("{}", System::boot_time())
+    #[cfg(desktop)]
+    return format!("{}", System::boot_time());
+    #[cfg(mobile)]
+    return "mobile-boot-session".to_string();
 }
 
 /// Paints the main window's native titlebar to match the active UI theme so the
@@ -620,6 +640,7 @@ fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         apply_main_titlebar_color(&window, current_titlebar_dark(app));
         let _ = window.show();
+        #[cfg(desktop)]
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
@@ -634,11 +655,16 @@ fn ensure_popup_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
         .title("Ortu Quick Access")
         .inner_size(550.0, 450.0)
         .resizable(false)
-        .decorations(false)
-        .visible(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .focused(true);
+        .visible(false);
+
+    #[cfg(desktop)]
+    {
+        builder = builder
+            .decorations(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .focused(true);
+    }
 
     #[cfg(not(target_os = "windows"))]
     {
@@ -810,7 +836,7 @@ fn show_popup(app: &tauri::AppHandle) {
         // the monitor it is leaving.
         center_popup(app, &window);
 
-        let w = window.clone();
+        let _w = window.clone();
 
         #[cfg(target_os = "macos")]
         {
@@ -826,14 +852,14 @@ fn show_popup(app: &tauri::AppHandle) {
                 unsafe {
                     let ns_app = NSApp();
                     let _: () = msg_send![ns_app, activateIgnoringOtherApps: YES];
-                    if let Ok(handle) = w.ns_window() {
+                    if let Ok(handle) = _w.ns_window() {
                         let ns_window = handle as id;
                         let _: () = msg_send![ns_window, setLevel: 2000];
                         let _: () = msg_send![ns_window, makeKeyAndOrderFront: nil];
                     }
                 }
-                let _ = w.show();
-                let _ = w.set_focus();
+                let _ = _w.show();
+                let _ = _w.set_focus();
             });
         }
 
@@ -841,6 +867,7 @@ fn show_popup(app: &tauri::AppHandle) {
         {
             let _ = window.show();
             let _ = window.set_focus();
+            #[cfg(desktop)]
             let _ = window.set_always_on_top(true);
         }
     }

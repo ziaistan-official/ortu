@@ -1,4 +1,5 @@
 use crate::db::ClipboardDB;
+#[cfg(all(desktop, not(target_os = "android")))]
 use arboard::Clipboard;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -50,6 +51,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Encodes a clipboard image to PNG (+ thumbnail), stores it in the blob table,
 /// and records a history row referencing it by hash.
+#[cfg(all(desktop, not(target_os = "android")))]
 fn store_image(db: &ClipboardDB, img: arboard::ImageData, hash: &str) -> Result<(), String> {
     let width = img.width as u32;
     let height = img.height as u32;
@@ -74,6 +76,7 @@ fn store_image(db: &ClipboardDB, img: arboard::ImageData, hash: &str) -> Result<
 }
 
 /// Captures an image from the clipboard when no text/files are present.
+#[cfg(all(desktop, not(target_os = "android")))]
 fn try_capture_image(app: &AppHandle, last_signature: &mut String, clipboard: &mut Clipboard) -> bool {
     let img = match clipboard.get_image() {
         Ok(i) => i,
@@ -513,6 +516,7 @@ fn pasteboard_types() -> Vec<String> {
     Vec::new()
 }
 
+#[cfg(all(desktop, not(target_os = "android")))]
 pub fn start_listener(app: AppHandle) {
     thread::spawn(move || {
         let mut clipboard = match Clipboard::new() {
@@ -878,6 +882,11 @@ pub fn start_listener(app: AppHandle) {
             }
         }
     });
+}
+
+#[cfg(any(mobile, target_os = "android"))]
+pub fn start_listener(_app: AppHandle) {
+    // Android / iOS manage clipboard access via plugins and system events.
 }
 
 #[cfg(test)]
