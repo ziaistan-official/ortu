@@ -516,6 +516,295 @@ fn pasteboard_types() -> Vec<String> {
     Vec::new()
 }
 
+fn process_captured_text(app: &AppHandle, text: String, last_signature: &mut String) -> bool {
+    let normalized = text.trim().to_string();
+    if normalized.is_empty() {
+        return false;
+    }
+    let signature = format!("text:{}", normalized);
+    if signature == *last_signature {
+        return false;
+    }
+
+    let mut scores: HashMap<String, f32> = HashMap::new();
+    let first = first_token_lowercase(&normalized);
+    let lower = normalized.to_ascii_lowercase();
+    let line_count = normalized.lines().count();
+
+    // ── DevOps / Containers ────────────────────────────────────────────
+    if starts_with_any(&first, &["docker", "docker-compose"]) {
+        add_score(&mut scores, "Docker", 0.98);
+        add_score(&mut scores, "DevOps", 0.92);
+    }
+    if ["FROM ", "RUN ", "COPY ", "ADD ", "ENV ", "EXPOSE ", "CMD ", "ENTRYPOINT "]
+        .iter()
+        .filter(|kw| normalized.contains(*kw))
+        .count()
+        >= 2
+    {
+        add_score(&mut scores, "Docker", 0.88);
+        add_score(&mut scores, "DevOps", 0.82);
+    }
+    if starts_with_any(&first, &["kubectl", "helm"]) {
+        add_score(&mut scores, "Kubernetes", 0.98);
+        add_score(&mut scores, "DevOps", 0.92);
+    }
+    if first == "terraform" || first.starts_with("ansible") {
+        add_score(&mut scores, "IaC", 0.95);
+        add_score(&mut scores, "DevOps", 0.9);
+    }
+    if starts_with_any(&first, &["aws", "gcloud", "az", "doctl", "flyctl"]) {
+        add_score(&mut scores, "Cloud CLI", 0.93);
+        add_score(&mut scores, "DevOps", 0.88);
+    }
+
+    // ── Version Control ────────────────────────────────────────────────
+    if starts_with_any(&first, &["git", "gh", "svn", "hg"]) {
+        add_score(&mut scores, "Version Control", 0.97);
+    }
+    if !normalized.contains(' ')
+        && (normalized.len() == 40 || (normalized.len() >= 7 && normalized.len() <= 12))
+        && normalized.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        add_score(&mut scores, "Version Control", 0.80);
+    }
+
+    // ── Package Management ─────────────────────────────────────────────
+    if starts_with_any(
+        &first,
+        &[
+            "npm", "npx", "yarn", "pnpm", "pip", "pip3", "poetry", "cargo", "brew",
+            "apt", "apt-get", "yum", "dnf", "pacman", "gem", "bundle", "composer",
+            "nuget", "mix", "hex",
+        ],
+    ) || (first == "go"
+        && normalized
+            .split_whitespace()
+            .nth(1)
+            .map(|s| matches!(s, "mod" | "get" | "build" | "run" | "test" | "install"))
+            .unwrap_or(false))
+    {
+        add_score(&mut scores, "Package Management", 0.9);
+    }
+
+    // ── Runtime / Build ────────────────────────────────────────────────
+    if starts_with_any(
+        &first,
+        &[
+            "node", "python", "python3", "java", "mvn", "gradle", "dotnet", "rustc",
+            "deno", "bun", "ruby", "perl", "php", "elixir",
+        ],
+    ) {
+        add_score(&mut scores, "Runtime / Build", 0.84);
+    }
+
+    // ── Shell / OS ─────────────────────────────────────────────────────
+    if starts_with_any(
+        &first,
+        &[
+            "cd", "ls", "pwd", "cp", "mv", "rm", "cat", "less", "grep", "find", "chmod",
+            "chown", "zsh", "bash", "sh", "fish", "echo", "export", "source", "env",
+            "printenv", "xargs", "tee", "awk", "sed", "sort", "uniq", "wc", "head",
+            "tail", "touch", "mkdir", "rmdir", "ln", "du", "df", "ps", "kill",
+            "killall", "top", "htop", "screen", "tmux", "nohup", "sudo", "su",
+        ],
+    ) || first.starts_with("get-")
+        || first.starts_with("set-")
+        || first.starts_with("new-")
+        || first.starts_with("remove-")
+        || normalized.contains("||")
+        || normalized.contains("&&")
+        || normalized.contains(">>")
+        || normalized.contains("<<")
+        || normalized.contains("; ")
+        || normalized.contains("$(")
+        || normalized.contains("${")
+        || normalized.starts_with("#!/")
+    {
+        add_score(&mut scores, "Shell / OS", 0.82);
+    }
+
+    // ── Config / Environment variables ─────────────────────────────────
+    if looks_like_env_var(&normalized) {
+        add_score(&mut scores, "Config / Env", 0.88);
+    }
+
+    // ── Networking ─────────────────────────────────────────────────────
+    if starts_with_any(
+        &first,
+        &[
+            "curl", "wget", "http", "ping", "netstat", "ss", "lsof", "nmap", "dig",
+            "nslookup", "traceroute", "tracert", "ifconfig", "ip", "iptables", "ufw",
+            "nc", "netcat", "socat", "tcpdump", "ssh", "scp", "rsync", "sftp", "ftp",
+        ],
+    ) {
+        add_score(&mut scores, "Networking", 0.86);
+    }
+    if looks_like_ip_address(&normalized) {
+        add_score(&mut scores, "Networking", 0.85);
+    }
+
+    // ── SSH / Certificates ─────────────────────────────────────────────
+    if looks_like_ssh_key(&normalized) {
+        add_score(&mut scores, "SSH / Certificates", 0.96);
+        add_score(&mut scores, "Security", 0.85);
+    }
+
+    // ── Database ───────────────────────────────────────────────────────
+    if starts_with_any(
+        &first,
+        &["psql", "mysql", "redis-cli", "mongo", "sqlite3", "mongosh"],
+    ) {
+        add_score(&mut scores, "Database", 0.92);
+    }
+    {
+        let sql_keywords = [
+            "select ", "insert ", "update ", "delete ", "create table",
+            "alter table", "drop table", "truncate ", "from ", "where ",
+            "join ", "having ", "group by", "order by",
+        ];
+        let matched = sql_keywords
+            .iter()
+            .filter(|kw| lower.contains(*kw))
+            .count();
+        if matched >= 3 {
+            add_score(&mut scores, "Database", 0.92);
+        } else if matched == 1 || matched == 2 {
+            add_score(&mut scores, "Database", 0.72);
+        }
+    }
+
+    // ── CI / Build ─────────────────────────────────────────────────────
+    if starts_with_any(&first, &["make", "cmake", "bazel", "meson", "ninja"])
+        || normalized.contains("runs-on:")
+        || normalized.contains("uses:")
+        || normalized.contains("steps:")
+        || lower.contains(".github/workflows")
+        || lower.contains("pipeline:")
+    {
+        add_score(&mut scores, "CI / Build", 0.88);
+    }
+
+    // ── URL ────────────────────────────────────────────────────────────
+    if looks_like_url(&normalized) {
+        add_score(&mut scores, "URL", 0.97);
+        add_score(&mut scores, "Web", 0.9);
+    }
+
+    // ── Email ──────────────────────────────────────────────────────────
+    if looks_like_email(&normalized) {
+        add_score(&mut scores, "Email", 0.90);
+    }
+
+    // ── Structured data formats ────────────────────────────────────────
+    if looks_like_json(&normalized) {
+        add_score(&mut scores, "JSON", 0.92);
+    }
+    if looks_like_xml(&normalized) {
+        add_score(&mut scores, "XML", 0.88);
+    }
+    if looks_like_yaml(&normalized) {
+        add_score(&mut scores, "YAML", 0.87);
+    }
+    if looks_like_csv(&normalized) {
+        add_score(&mut scores, "CSV", 0.84);
+    }
+    if looks_like_markdown(&normalized) {
+        add_score(&mut scores, "Markdown", 0.85);
+    }
+
+    // ── File paths ─────────────────────────────────────────────────────
+    if looks_like_windows_path(&normalized) || looks_like_unix_path(&normalized) {
+        add_score(&mut scores, "Path", 0.86);
+    }
+
+    // ── Code snippets ──────────────────────────────────────────────────
+    if looks_like_code_snippet(&normalized) {
+        add_score(&mut scores, "Code Snippet", 0.82);
+        if let Some(lang) = detect_language(&normalized) {
+            add_score(&mut scores, lang, 0.85);
+            add_score(&mut scores, "Code Snippet", 0.85);
+        }
+    }
+    if line_count >= 3 {
+        let indented = normalized
+            .lines()
+            .filter(|l| l.starts_with("    ") || l.starts_with('\t'))
+            .count();
+        if indented >= 2 && indented * 2 >= line_count {
+            add_score(&mut scores, "Code Snippet", 0.74);
+        }
+    }
+
+    // ── UUIDs ──────────────────────────────────────────────────────────
+    if looks_like_uuid(&normalized) {
+        add_score(&mut scores, "UUID", 0.95);
+    }
+
+    // ── Auth / Security ────────────────────────────────────────────────
+    if looks_like_jwt(&normalized) {
+        add_score(&mut scores, "JWT / Token", 0.92);
+        add_score(&mut scores, "Security", 0.82);
+    }
+    if looks_like_secret_key(&normalized) {
+        add_score(&mut scores, "Secret / Key", 0.90);
+        add_score(&mut scores, "Security", 0.82);
+    }
+
+    // ── Contact info ───────────────────────────────────────────────────
+    if looks_like_phone_number(&normalized) {
+        add_score(&mut scores, "Phone Number", 0.82);
+    }
+
+    // ── Encoded data ───────────────────────────────────────────────────
+    if scores.is_empty() && looks_like_base64(&normalized) {
+        add_score(&mut scores, "Base64", 0.72);
+    }
+
+    // ── Fallback ───────────────────────────────────────────────────────
+    if scores.is_empty() {
+        add_score(&mut scores, "Text", 0.4);
+    }
+
+    if let Some(db) = app.try_state::<ClipboardDB>() {
+        if scores.len() == 1 && scores.get("Text").is_some() {
+            if let Ok(Some(sim_cat)) = db.find_similar_category(&normalized) {
+                add_score(&mut scores, &sim_cat, 0.45);
+            }
+        }
+
+        let looks_sensitive = scores_are_sensitive(&scores);
+        let auto_mask = looks_sensitive
+            && db.get_setting("auto_mask_secrets").ok().flatten().as_deref() == Some("1");
+
+        let (content_to_store, is_sensitive) = if auto_mask {
+            match crate::crypto::get_or_create_key(app)
+                .and_then(|key| crate::crypto::encrypt(&key, &normalized))
+            {
+                Ok(enc) => (enc, true),
+                Err(_) => (normalized, false),
+            }
+        } else {
+            (normalized, false)
+        };
+
+        if db
+            .insert_auto_grouped_content(
+                "text",
+                content_to_store,
+                finalize_scores(scores),
+                is_sensitive,
+            )
+            .is_ok()
+        {
+            *last_signature = signature;
+            let _ = app.emit("clipboard-updated", ());
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(all(desktop, not(target_os = "android")))]
 pub fn start_listener(app: AppHandle) {
     thread::spawn(move || {
@@ -592,301 +881,43 @@ pub fn start_listener(app: AppHandle) {
                 continue;
             }
 
-            let normalized = text.trim().to_string();
-            let signature = format!("text:{}", normalized);
-            if signature == last_signature {
-                continue;
-            }
-
-            let mut scores: HashMap<String, f32> = HashMap::new();
-            let first = first_token_lowercase(&normalized);
-            let lower = normalized.to_ascii_lowercase();
-            let line_count = normalized.lines().count();
-
-            // ── DevOps / Containers ────────────────────────────────────────────
-            if starts_with_any(&first, &["docker", "docker-compose"]) {
-                add_score(&mut scores, "Docker", 0.98);
-                add_score(&mut scores, "DevOps", 0.92);
-            }
-            // Dockerfile instruction pattern
-            if ["FROM ", "RUN ", "COPY ", "ADD ", "ENV ", "EXPOSE ", "CMD ", "ENTRYPOINT "]
-                .iter()
-                .filter(|kw| normalized.contains(*kw))
-                .count()
-                >= 2
-            {
-                add_score(&mut scores, "Docker", 0.88);
-                add_score(&mut scores, "DevOps", 0.82);
-            }
-            if starts_with_any(&first, &["kubectl", "helm"]) {
-                add_score(&mut scores, "Kubernetes", 0.98);
-                add_score(&mut scores, "DevOps", 0.92);
-            }
-            if first == "terraform" || first.starts_with("ansible") {
-                add_score(&mut scores, "IaC", 0.95);
-                add_score(&mut scores, "DevOps", 0.9);
-            }
-            if starts_with_any(&first, &["aws", "gcloud", "az", "doctl", "flyctl"]) {
-                add_score(&mut scores, "Cloud CLI", 0.93);
-                add_score(&mut scores, "DevOps", 0.88);
-            }
-
-            // ── Version Control ────────────────────────────────────────────────
-            if starts_with_any(&first, &["git", "gh", "svn", "hg"]) {
-                add_score(&mut scores, "Version Control", 0.97);
-            }
-            // Git commit hash: 7–12 char short form or 40-char full SHA
-            if !normalized.contains(' ')
-                && (normalized.len() == 40
-                    || (normalized.len() >= 7 && normalized.len() <= 12))
-                && normalized.chars().all(|c| c.is_ascii_hexdigit())
-            {
-                add_score(&mut scores, "Version Control", 0.80);
-            }
-
-            // ── Package Management ─────────────────────────────────────────────
-            if starts_with_any(
-                &first,
-                &[
-                    "npm", "npx", "yarn", "pnpm", "pip", "pip3", "poetry", "cargo", "brew",
-                    "apt", "apt-get", "yum", "dnf", "pacman", "gem", "bundle", "composer",
-                    "nuget", "mix", "hex",
-                ],
-            ) || (first == "go"
-                && normalized
-                    .split_whitespace()
-                    .nth(1)
-                    .map(|s| matches!(s, "mod" | "get" | "build" | "run" | "test" | "install"))
-                    .unwrap_or(false))
-            {
-                add_score(&mut scores, "Package Management", 0.9);
-            }
-
-            // ── Runtime / Build ────────────────────────────────────────────────
-            if starts_with_any(
-                &first,
-                &[
-                    "node", "python", "python3", "java", "mvn", "gradle", "dotnet", "rustc",
-                    "deno", "bun", "ruby", "perl", "php", "elixir",
-                ],
-            ) {
-                add_score(&mut scores, "Runtime / Build", 0.84);
-            }
-
-            // ── Shell / OS ─────────────────────────────────────────────────────
-            if starts_with_any(
-                &first,
-                &[
-                    "cd", "ls", "pwd", "cp", "mv", "rm", "cat", "less", "grep", "find", "chmod",
-                    "chown", "zsh", "bash", "sh", "fish", "echo", "export", "source", "env",
-                    "printenv", "xargs", "tee", "awk", "sed", "sort", "uniq", "wc", "head",
-                    "tail", "touch", "mkdir", "rmdir", "ln", "du", "df", "ps", "kill",
-                    "killall", "top", "htop", "screen", "tmux", "nohup", "sudo", "su",
-                ],
-            ) || first.starts_with("get-")
-                || first.starts_with("set-")
-                || first.starts_with("new-")
-                || first.starts_with("remove-")
-                || normalized.contains("||")
-                || normalized.contains("&&")
-                || normalized.contains(">>")
-                || normalized.contains("<<")
-                || normalized.contains("; ")
-                || normalized.contains("$(")
-                || normalized.contains("${")
-                || normalized.starts_with("#!/")
-            {
-                add_score(&mut scores, "Shell / OS", 0.82);
-            }
-
-            // ── Config / Environment variables ─────────────────────────────────
-            if looks_like_env_var(&normalized) {
-                add_score(&mut scores, "Config / Env", 0.88);
-            }
-
-            // ── Networking ─────────────────────────────────────────────────────
-            if starts_with_any(
-                &first,
-                &[
-                    "curl", "wget", "http", "ping", "netstat", "ss", "lsof", "nmap", "dig",
-                    "nslookup", "traceroute", "tracert", "ifconfig", "ip", "iptables", "ufw",
-                    "nc", "netcat", "socat", "tcpdump", "ssh", "scp", "rsync", "sftp", "ftp",
-                ],
-            ) {
-                add_score(&mut scores, "Networking", 0.86);
-            }
-            if looks_like_ip_address(&normalized) {
-                add_score(&mut scores, "Networking", 0.85);
-            }
-
-            // ── SSH / Certificates ─────────────────────────────────────────────
-            if looks_like_ssh_key(&normalized) {
-                add_score(&mut scores, "SSH / Certificates", 0.96);
-                add_score(&mut scores, "Security", 0.85);
-            }
-
-            // ── Database ───────────────────────────────────────────────────────
-            if starts_with_any(
-                &first,
-                &["psql", "mysql", "redis-cli", "mongo", "sqlite3", "mongosh"],
-            ) {
-                add_score(&mut scores, "Database", 0.92);
-            }
-            {
-                let sql_keywords = [
-                    "select ", "insert ", "update ", "delete ", "create table",
-                    "alter table", "drop table", "truncate ", "from ", "where ",
-                    "join ", "having ", "group by", "order by",
-                ];
-                let matched = sql_keywords
-                    .iter()
-                    .filter(|kw| lower.contains(*kw))
-                    .count();
-                if matched >= 3 {
-                    add_score(&mut scores, "Database", 0.92);
-                } else if matched == 1 || matched == 2 {
-                    add_score(&mut scores, "Database", 0.72);
-                }
-            }
-
-            // ── CI / Build ─────────────────────────────────────────────────────
-            if starts_with_any(&first, &["make", "cmake", "bazel", "meson", "ninja"])
-                || normalized.contains("runs-on:")
-                || normalized.contains("uses:")
-                || normalized.contains("steps:")
-                || lower.contains(".github/workflows")
-                || lower.contains("pipeline:")
-            {
-                add_score(&mut scores, "CI / Build", 0.88);
-            }
-
-            // ── URL ────────────────────────────────────────────────────────────
-            if looks_like_url(&normalized) {
-                add_score(&mut scores, "URL", 0.97);
-                add_score(&mut scores, "Web", 0.9);
-            }
-
-            // ── Email ──────────────────────────────────────────────────────────
-            if looks_like_email(&normalized) {
-                add_score(&mut scores, "Email", 0.90);
-            }
-
-            // ── Structured data formats ────────────────────────────────────────
-            if looks_like_json(&normalized) {
-                add_score(&mut scores, "JSON", 0.92);
-            }
-            if looks_like_xml(&normalized) {
-                add_score(&mut scores, "XML", 0.88);
-            }
-            if looks_like_yaml(&normalized) {
-                add_score(&mut scores, "YAML", 0.87);
-            }
-            if looks_like_csv(&normalized) {
-                add_score(&mut scores, "CSV", 0.84);
-            }
-            if looks_like_markdown(&normalized) {
-                add_score(&mut scores, "Markdown", 0.85);
-            }
-
-            // ── File paths ─────────────────────────────────────────────────────
-            if looks_like_windows_path(&normalized) || looks_like_unix_path(&normalized) {
-                add_score(&mut scores, "Path", 0.86);
-            }
-
-            // ── Code snippets ──────────────────────────────────────────────────
-            if looks_like_code_snippet(&normalized) {
-                add_score(&mut scores, "Code Snippet", 0.82);
-                if let Some(lang) = detect_language(&normalized) {
-                    add_score(&mut scores, lang, 0.85);
-                    // Strengthen "Code Snippet" when we can confirm the language
-                    add_score(&mut scores, "Code Snippet", 0.85);
-                }
-            }
-            // Multi-line indented block heuristic
-            if line_count >= 3 {
-                let indented = normalized
-                    .lines()
-                    .filter(|l| l.starts_with("    ") || l.starts_with('\t'))
-                    .count();
-                if indented >= 2 && indented * 2 >= line_count {
-                    add_score(&mut scores, "Code Snippet", 0.74);
-                }
-            }
-
-            // ── UUIDs ──────────────────────────────────────────────────────────
-            if looks_like_uuid(&normalized) {
-                add_score(&mut scores, "UUID", 0.95);
-            }
-
-            // ── Auth / Security ────────────────────────────────────────────────
-            if looks_like_jwt(&normalized) {
-                add_score(&mut scores, "JWT / Token", 0.92);
-                add_score(&mut scores, "Security", 0.82);
-            }
-            if looks_like_secret_key(&normalized) {
-                add_score(&mut scores, "Secret / Key", 0.90);
-                add_score(&mut scores, "Security", 0.82);
-            }
-
-            // ── Contact info ───────────────────────────────────────────────────
-            if looks_like_phone_number(&normalized) {
-                add_score(&mut scores, "Phone Number", 0.82);
-            }
-
-            // ── Encoded data (low priority — only if nothing else matched) ─────
-            if scores.is_empty() && looks_like_base64(&normalized) {
-                add_score(&mut scores, "Base64", 0.72);
-            }
-
-            // ── Fallback ───────────────────────────────────────────────────────
-            if scores.is_empty() {
-                add_score(&mut scores, "Text", 0.4);
-            }
-
-            if let Some(db) = app.try_state::<ClipboardDB>() {
-                if scores.len() == 1 && scores.get("Text").is_some() {
-                    if let Ok(Some(sim_cat)) = db.find_similar_category(&normalized) {
-                        add_score(&mut scores, &sim_cat, 0.45);
-                    }
-                }
-
-                // Optional auto-masking: when enabled, secrets detected by the
-                // classifier are stored encrypted + masked instead of plaintext.
-                let looks_sensitive = scores_are_sensitive(&scores);
-                let auto_mask = looks_sensitive
-                    && db.get_setting("auto_mask_secrets").ok().flatten().as_deref() == Some("1");
-
-                let (content_to_store, is_sensitive) = if auto_mask {
-                    match crate::crypto::get_or_create_key(&app)
-                        .and_then(|key| crate::crypto::encrypt(&key, &normalized))
-                    {
-                        Ok(enc) => (enc, true),
-                        Err(_) => (normalized, false), // fall back to plaintext on key failure
-                    }
-                } else {
-                    (normalized, false)
-                };
-
-                if db
-                    .insert_auto_grouped_content(
-                        "text",
-                        content_to_store,
-                        finalize_scores(scores),
-                        is_sensitive,
-                    )
-                    .is_ok()
-                {
-                    last_signature = signature;
-                    let _ = app.emit("clipboard-updated", ());
-                }
-            }
+            process_captured_text(&app, text, &mut last_signature);
         }
     });
 }
 
 #[cfg(any(mobile, target_os = "android"))]
-pub fn start_listener(_app: AppHandle) {
-    // Android / iOS manage clipboard access via plugins and system events.
+pub fn start_listener(app: AppHandle) {
+    use std::sync::{Arc, Mutex};
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+
+    thread::spawn(move || {
+        let last_sig = Arc::new(Mutex::new(String::new()));
+        let paused_flag = app.try_state::<crate::CapturePaused>().map(|s| s.0.clone());
+
+        loop {
+            thread::sleep(Duration::from_millis(500));
+
+            if let Some(flag) = &paused_flag {
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue;
+                }
+            }
+
+            let app_handle = app.clone();
+            let sig_arc = last_sig.clone();
+
+            let _ = app.run_on_main_thread(move || {
+                if let Ok(text) = app_handle.clipboard().read_text() {
+                    if !text.trim().is_empty() && text.len() <= 50 * 1024 * 1024 {
+                        if let Ok(mut sig_guard) = sig_arc.lock() {
+                            process_captured_text(&app_handle, text, &mut *sig_guard);
+                        }
+                    }
+                }
+            });
+        }
+    });
 }
 
 #[cfg(test)]

@@ -797,7 +797,7 @@
 <div class="flex flex-col h-screen bg-app text-fg overflow-hidden selection:bg-[#FF8A3D]/20">
 
   <!-- ── Header ─────────────────────────────────────── -->
-  <header class="{currentPlatform === 'macos' ? 'mt-6' : ''} h-[44px] shrink-0 px-4 flex items-center justify-between bg-app border-b border-overlay/[0.09]">
+  <header class="{currentPlatform === 'macos' ? 'mt-6' : currentPlatform === 'android' ? 'mt-8' : ''} h-[44px] shrink-0 px-4 flex items-center justify-between bg-app border-b border-overlay/[0.09]">
     <!-- Capture status pill: click to pause/resume clipboard monitoring -->
     <button
       onclick={toggleCapture}
