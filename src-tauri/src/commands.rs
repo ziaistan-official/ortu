@@ -45,11 +45,74 @@ pub fn get_categories(app: tauri::AppHandle) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-pub fn create_group(app: tauri::AppHandle, name: String) -> Result<i64, String> {
+pub fn create_group(
+    app: tauri::AppHandle,
+    name: String,
+    parent_id: Option<i64>,
+    icon: Option<String>,
+) -> Result<i64, String> {
     let db = app.state::<ClipboardDB>();
-    let id = db.create_group(name).map_err(|e| e.to_string())?;
+    let id = db.create_group(name, parent_id, icon).map_err(|e| e.to_string())?;
     let _ = app.emit("clipboard-updated", ());
     Ok(id)
+}
+
+#[tauri::command]
+pub fn get_groups_detailed(app: tauri::AppHandle) -> Result<Vec<crate::db::Group>, String> {
+    let db = app.state::<ClipboardDB>();
+    db.get_groups_detailed().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_items_batch(app: tauri::AppHandle, ids: Vec<i64>) -> Result<(), String> {
+    let db = app.state::<ClipboardDB>();
+    db.delete_items_batch(ids).map_err(|e| e.to_string())?;
+    let _ = app.emit("clipboard-updated", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn add_items_to_group_batch(
+    app: tauri::AppHandle,
+    ids: Vec<i64>,
+    group_name: String,
+) -> Result<(), String> {
+    let db = app.state::<ClipboardDB>();
+    db.add_items_to_group_batch(ids, group_name).map_err(|e| e.to_string())?;
+    let _ = app.emit("clipboard-updated", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn remove_items_from_group_batch(
+    app: tauri::AppHandle,
+    ids: Vec<i64>,
+    group_name: String,
+) -> Result<(), String> {
+    let db = app.state::<ClipboardDB>();
+    db.remove_items_from_group_batch(ids, group_name).map_err(|e| e.to_string())?;
+    let _ = app.emit("clipboard-updated", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn minimize_popup_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(popup) = app.get_webview_window("popup") {
+        let _ = popup.minimize();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn maximize_popup_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(popup) = app.get_webview_window("popup") {
+        if popup.is_maximized().unwrap_or(false) {
+            let _ = popup.unmaximize();
+        } else {
+            let _ = popup.maximize();
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

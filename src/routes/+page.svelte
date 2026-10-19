@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import type { ClipboardItem, Snippet } from "$lib/types";
+  import type { ClipboardItem, Group, Snippet } from "$lib/types";
   import { listen } from "@tauri-apps/api/event";
   import { save, open } from "@tauri-apps/plugin-dialog";
   import { platform } from "@tauri-apps/plugin-os";
@@ -18,6 +18,7 @@
   let history = $state<ClipboardItem[]>([]);
   let allItems = $state<ClipboardItem[]>([]); // unfiltered, for sidebar counts
   let groups = $state<string[]>([]);
+  let detailedGroups = $state<Group[]>([]);
   let searchQuery = $state("");
   let selectedIndex = $state(0);
   let container = $state<HTMLDivElement | null>(null);
@@ -28,12 +29,62 @@
   let capturePaused = $state(false);
   let selectedGroup = $state<string | null>(null);
   let newGroupName = $state("");
+  let newGroupParentId = $state<number | null>(null);
+  let newGroupIcon = $state("📁");
   let editingGroup = $state<string | null>(null);
   let editGroupName = $state("");
   let expandedItems = $state<number[]>([]);
   let appVersion = $state("1.0.0");
   let flashingItemId = $state<number | null>(null);
   let flashTimer: number | null = null;
+
+  // Multi-selection state for batch actions (stacks, deletion, move, share)
+  let multiSelectMode = $state(false);
+  let selectedItemIds = $state<number[]>([]);
+
+  function toggleMultiSelect(id: number) {
+    if (selectedItemIds.includes(id)) {
+      selectedItemIds = selectedItemIds.filter(i => i !== id);
+    } else {
+      selectedItemIds = [...selectedItemIds, id];
+    }
+  }
+
+  function clearMultiSelection() {
+    selectedItemIds = [];
+    multiSelectMode = false;
+  }
+
+  async function batchDelete() {
+    if (selectedItemIds.length === 0) return;
+    confirmAction(`Delete ${selectedItemIds.length} selected item(s)?`, async () => {
+      try {
+        await invoke("delete_items_batch", { ids: selectedItemIds });
+        clearMultiSelection();
+        await refreshAll();
+        showToast("Items deleted", "success");
+      } catch (e) { showToast("Batch delete failed: " + e, "error"); }
+    });
+  }
+
+  async function batchMoveToGroup(groupName: string) {
+    if (selectedItemIds.length === 0 || !groupName) return;
+    try {
+      await invoke("add_items_to_group_batch", { ids: selectedItemIds, groupName });
+      clearMultiSelection();
+      await refreshAll();
+      showToast(`Added items to ${groupName}`, "success");
+    } catch (e) { showToast("Batch move failed: " + e, "error"); }
+  }
+
+  async function batchAddToStack() {
+    if (selectedItemIds.length === 0) return;
+    for (const id of selectedItemIds) {
+      await invoke("stack_add", { id });
+    }
+    clearMultiSelection();
+    showToast("Selected items added to stack", "success");
+  }
 
   // ── Modal / IO state ───────────────────────────────────
   let showExportModal = $state(false);
@@ -436,8 +487,10 @@
   }
 
   async function loadGroups() {
-    try { groups = (await invoke("get_categories")) as string[]; }
-    catch (e) { console.error("Failed to load groups:", e); }
+    try {
+      groups = (await invoke("get_categories")) as string[];
+      detailedGroups = (await invoke("get_groups_detailed")) as Group[];
+    } catch (e) { console.error("Failed to load groups:", e); }
   }
 
   async function refreshAll() {
@@ -481,8 +534,18 @@
 
   async function createGroup() {
     if (!newGroupName.trim()) return;
-    try { await invoke("create_group", { name: newGroupName.trim() }); newGroupName = ""; await loadGroups(); }
-    catch (e) { console.error(e); }
+    try {
+      await invoke("create_group", {
+        name: newGroupName.trim(),
+        parentId: newGroupParentId,
+        icon: newGroupIcon.trim() || null
+      });
+      newGroupName = "";
+      newGroupParentId = null;
+      newGroupIcon = "📁";
+      await loadGroups();
+      showToast("Group created", "success");
+    } catch (e) { showToast("Failed to create group: " + e, "error"); }
   }
 
   async function deleteGroup(name: string) {
@@ -599,14 +662,17 @@
   async function copyItem(item: ClipboardItem, index: number) {
     selectedIndex = index;
     try {
-      await invoke("copy_item_to_clipboard", { id: item.id });
+      await invoke("copy_item_and_paste", { id: item.id });
       // Flash the card
       if (flashTimer) clearTimeout(flashTimer);
       flashingItemId = item.id;
       flashTimer = window.setTimeout(() => { flashingItemId = null; flashTimer = null; }, 380);
-      // Unified toast confirmation
+      showToast("Pasted to active app", "success");
+    } catch (err) {
+      // Fallback to copy if keystroke simulation is unavailable or fails
+      await invoke("copy_item_to_clipboard", { id: item.id });
       showToast("Copied to clipboard", "success");
-    } catch (err) { console.error("Failed to copy:", err); }
+    }
   }
 
   async function addManualItem() {
@@ -797,7 +863,7 @@
 <div class="flex flex-col h-screen bg-app text-fg overflow-hidden selection:bg-[#FF8A3D]/20">
 
   <!-- ── Header ─────────────────────────────────────── -->
-  <header class="{currentPlatform === 'macos' ? 'mt-6' : currentPlatform === 'android' ? 'mt-8' : ''} h-[44px] shrink-0 px-4 flex items-center justify-between bg-app border-b border-overlay/[0.09]">
+  <header class="{currentPlatform === 'macos' ? 'mt-6' : currentPlatform === 'android' ? 'mt-12 pt-4' : ''} h-[44px] shrink-0 px-4 flex items-center justify-between bg-app border-b border-overlay/[0.09]">
     <!-- Capture status pill: click to pause/resume clipboard monitoring -->
     <button
       onclick={toggleCapture}
@@ -822,6 +888,15 @@
       {/if}
     </button>
     <div class="flex items-center gap-1">
+      <!-- Multi-select toggle -->
+      <button
+        onclick={() => { multiSelectMode = !multiSelectMode; if (!multiSelectMode) selectedItemIds = []; }}
+        class="h-[26px] px-2.5 flex items-center justify-center rounded-md text-[11px] font-semibold transition-all {multiSelectMode ? 'bg-[#FF8A3D]/20 text-[#FF8A3D] border border-[#FF8A3D]/40' : 'text-fg/55 hover:text-fg/90 hover:bg-overlay/[0.09]'}"
+        title="Toggle multi-select mode"
+      >
+        Select {selectedItemIds.length > 0 ? `(${selectedItemIds.length})` : ''}
+      </button>
+
       <!-- Paste stack -->
       <div class="relative mr-1">
         <button
@@ -1102,6 +1177,18 @@
     <!-- ── Main area ──────────────────────────────────── -->
     <main class="flex-1 min-w-0 flex flex-col bg-app">
 
+      <!-- Multi-select Batch Actions Bar -->
+      {#if multiSelectMode && selectedItemIds.length > 0}
+        <div class="mx-3 mt-2 px-3 py-2 bg-[#FF8A3D]/[0.1] border border-[#FF8A3D]/[0.25] rounded-xl flex items-center justify-between z-10 animate-fade-in">
+          <span class="text-[12px] font-semibold text-fg/80">{selectedItemIds.length} item(s) selected</span>
+          <div class="flex items-center gap-2">
+            <button onclick={batchAddToStack} class="px-2.5 py-1 bg-overlay/[0.1] hover:bg-overlay/[0.18] rounded-lg text-[11px] font-medium text-fg/80 transition-colors">Add to Stack</button>
+            <button onclick={batchDelete} class="px-2.5 py-1 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded-lg text-[11px] font-medium transition-colors">Delete</button>
+            <button onclick={clearMultiSelection} class="px-2 py-1 text-fg/40 hover:text-fg/80 text-[11px] transition-colors">Cancel</button>
+          </div>
+        </div>
+      {/if}
+
       <!-- Search -->
       <div class="px-3 pt-3 pb-2.5">
         <div class="relative flex items-center gap-2">
@@ -1195,9 +1282,20 @@
                     <div class="absolute left-0 top-0 bottom-0 w-[3px] bg-gradient-to-b from-[#FF8A3D] to-[#ff6b1a] rounded-r-full" aria-hidden="true"></div>
                   {/if}
 
-                  <div class="pl-4 pr-3 pt-3 pb-2.5">
-                    {@render cardContent(item, urlInfo, codeLang, isSelected)}
-                    {@render cardMeta(item, isSelected, index)}
+                  <div class="flex items-center pl-3 pr-3 pt-3 pb-2.5">
+                    {#if multiSelectMode}
+                      <input
+                        type="checkbox"
+                        checked={selectedItemIds.includes(item.id)}
+                        onchange={() => toggleMultiSelect(item.id)}
+                        onclick={(e) => e.stopPropagation()}
+                        class="accent-[#FF8A3D] mr-3 h-4 w-4 shrink-0 rounded cursor-pointer"
+                      />
+                    {/if}
+                    <div class="flex-1 min-w-0">
+                      {@render cardContent(item, urlInfo, codeLang, isSelected)}
+                      {@render cardMeta(item, isSelected, index)}
+                    </div>
                   </div>
                 </div>
               {/each}
@@ -1522,10 +1620,20 @@
         </div>
         <button onclick={() => (isViewingGroups = false)} class="text-fg/25 hover:text-fg/70 transition-colors" aria-label="Close"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
-      <div class="p-5 border-b border-overlay/[0.05] shrink-0">
+      <div class="p-5 border-b border-overlay/[0.05] shrink-0 space-y-3">
         <div class="flex items-center gap-2">
+          <input type="text" bind:value={newGroupIcon} placeholder="Icon (e.g. 📁)" class="modal-input w-20 text-center" maxlength="4" />
           <input type="text" bind:value={newGroupName} placeholder="New group name…" class="modal-input flex-1" onkeydown={(e) => { if (e.key === "Enter") createGroup(); }} />
           <button onclick={createGroup} class="h-9 px-4 bg-[#AEB291]/80 hover:bg-[#AEB291] text-black text-[12px] font-semibold rounded-lg transition-colors">Create</button>
+        </div>
+        <div class="flex items-center gap-2">
+          <label for="parent-select" class="text-[11px] text-fg/40 shrink-0">Parent Group:</label>
+          <select id="parent-select" bind:value={newGroupParentId} class="modal-input flex-1 py-1 text-[12px] text-fg/70">
+            <option value={null}>None (Top-Level Group)</option>
+            {#each detailedGroups as g}
+              <option value={g.id}>{g.icon || "📁"} {g.name}</option>
+            {/each}
+          </select>
         </div>
       </div>
       <div class="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-1.5">
