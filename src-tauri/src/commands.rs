@@ -95,6 +95,7 @@ pub fn remove_items_from_group_batch(
     Ok(())
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 pub fn minimize_popup_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(popup) = app.get_webview_window("popup") {
@@ -103,6 +104,13 @@ pub fn minimize_popup_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(mobile)]
+#[tauri::command]
+pub fn minimize_popup_window(_app: tauri::AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(desktop)]
 #[tauri::command]
 pub fn maximize_popup_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(popup) = app.get_webview_window("popup") {
@@ -112,6 +120,12 @@ pub fn maximize_popup_window(app: tauri::AppHandle) -> Result<(), String> {
             let _ = popup.maximize();
         }
     }
+    Ok(())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+pub fn maximize_popup_window(_app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 

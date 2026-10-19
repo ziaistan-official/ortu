@@ -600,7 +600,7 @@ impl ClipboardDB {
         let items: Vec<&str> = content.split("\n---\n").collect();
 
         // Ensure group exists
-        let _ = self.create_group(name.clone());
+        let _ = self.create_group(name.clone(), None, None);
 
         for item in items {
             if !item.trim().is_empty() {
