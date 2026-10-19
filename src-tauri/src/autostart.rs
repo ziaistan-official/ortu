@@ -17,7 +17,7 @@
 
 #[cfg(desktop)]
 use tauri_plugin_autostart::ManagerExt;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 #[cfg(desktop)]
 use crate::startup_trace;

@@ -11,6 +11,14 @@ export interface ClipboardItem {
     is_sensitive: boolean;
 }
 
+export interface Group {
+    id: number;
+    name: string;
+    is_system: boolean;
+    parent_id: number | null;
+    icon: string | null;
+}
+
 export interface Snippet {
     id: number;
     name: string;

@@ -31,6 +31,8 @@ pub struct Group {
     pub id: i64,
     pub name: String,
     pub is_system: bool,
+    pub parent_id: Option<i64>,
+    pub icon: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -129,10 +131,16 @@ impl ClipboardDB {
             "CREATE TABLE IF NOT EXISTS groups (
                 id INTEGER PRIMARY KEY,
                 name TEXT UNIQUE NOT NULL,
-                is_system BOOLEAN DEFAULT 0
+                is_system BOOLEAN DEFAULT 0,
+                parent_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
+                icon TEXT
             )",
             [],
         )?;
+
+        // Migrate: add parent_id and icon columns if missing on existing installations
+        let _ = conn.execute("ALTER TABLE groups ADD COLUMN parent_id INTEGER REFERENCES groups(id) ON DELETE CASCADE", []);
+        let _ = conn.execute("ALTER TABLE groups ADD COLUMN icon TEXT", []);
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS history (
@@ -432,11 +440,16 @@ impl ClipboardDB {
         Ok(wiped)
     }
 
-    pub fn create_group(&self, name: String) -> Result<i64> {
+    pub fn create_group(
+        &self,
+        name: String,
+        parent_id: Option<i64>,
+        icon: Option<String>,
+    ) -> Result<i64> {
         let conn = self.conn.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
         conn.execute(
-            "INSERT INTO groups (name, is_system) VALUES (?1, 0)",
-            params![name],
+            "INSERT INTO groups (name, is_system, parent_id, icon) VALUES (?1, 0, ?2, ?3)",
+            params![name, parent_id, icon],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -587,7 +600,7 @@ impl ClipboardDB {
         let items: Vec<&str> = content.split("\n---\n").collect();
 
         // Ensure group exists
-        let _ = self.create_group(name.clone());
+        let _ = self.create_group(name.clone(), None, None);
 
         for item in items {
             if !item.trim().is_empty() {
@@ -1244,6 +1257,82 @@ impl ClipboardDB {
         Ok(categories)
     }
 
+    pub fn get_groups_detailed(&self) -> Result<Vec<Group>> {
+        let conn = self.conn.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, is_system, parent_id, icon FROM groups WHERE is_system = 0 ORDER BY name ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Group {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                is_system: row.get(2)?,
+                parent_id: row.get(3)?,
+                icon: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn delete_items_batch(&self, ids: Vec<i64>) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
+        let sql = format!("DELETE FROM history WHERE id IN ({})", placeholders.join(","));
+        let mut stmt = conn.prepare(&sql)?;
+        stmt.execute(rusqlite::params_from_iter(ids.iter()))?;
+        let _ = Self::prune_orphan_blobs(&conn);
+        Ok(())
+    }
+
+    pub fn add_items_to_group_batch(&self, ids: Vec<i64>, group_name: String) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let tx = conn.transaction()?;
+        let group_id = Self::ensure_group_with_type(&tx, &group_name, false)?;
+
+        for id in ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO item_groups (item_id, group_id) VALUES (?1, ?2)",
+                params![id, group_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_items_from_group_batch(&self, ids: Vec<i64>, group_name: String) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let tx = conn.transaction()?;
+        let group_id_res: Result<i64> = tx.query_row(
+            "SELECT id FROM groups WHERE name = ?1",
+            params![group_name],
+            |row| row.get(0),
+        );
+        if let Ok(group_id) = group_id_res {
+            let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
+            let sql = format!(
+                "DELETE FROM item_groups WHERE group_id = ?1 AND item_id IN ({})",
+                placeholders.join(",")
+            );
+            let mut params_vec: Vec<rusqlite::types::ToSqlOutput> = vec![group_id.into()];
+            for id in ids {
+                params_vec.push(id.into());
+            }
+            let mut stmt = tx.prepare(&sql)?;
+            stmt.execute(rusqlite::params_from_iter(params_vec.iter()))?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn list_snippets(&self) -> Result<Vec<Snippet>> {
         let conn = self.conn.lock().map_err(|_| rusqlite::Error::InvalidQuery)?;
         let mut stmt = conn.prepare(
@@ -1373,14 +1462,14 @@ impl ClipboardDB {
             if !groups.is_empty() {
                 let placeholders: Vec<String> = groups.iter().map(|_| "?".to_string()).collect();
                 format!(
-                    "SELECT id, name, is_system FROM groups WHERE name IN ({})",
+                    "SELECT id, name, is_system, parent_id, icon FROM groups WHERE name IN ({})",
                     placeholders.join(",")
                 )
             } else {
-                "SELECT id, name, is_system FROM groups".to_string()
+                "SELECT id, name, is_system, parent_id, icon FROM groups".to_string()
             }
         } else {
-            "SELECT id, name, is_system FROM groups".to_string()
+            "SELECT id, name, is_system, parent_id, icon FROM groups".to_string()
         };
 
         let mut stmt_grp = conn.prepare(&group_sql)?;
@@ -1396,6 +1485,8 @@ impl ClipboardDB {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 is_system: row.get(2)?,
+                parent_id: row.get(3)?,
+                icon: row.get(4)?,
             })
         })?;
         let groups: Vec<Group> = groups_iter.collect::<Result<_, _>>()?;

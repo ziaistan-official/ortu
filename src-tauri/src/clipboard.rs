@@ -3,6 +3,7 @@ use crate::db::ClipboardDB;
 use arboard::Clipboard;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+#[cfg(all(desktop, not(target_os = "android")))]
 use std::io::Cursor;
 use std::thread;
 use std::time::Duration;
@@ -530,6 +531,19 @@ fn process_captured_text(app: &AppHandle, text: String, last_signature: &mut Str
     let first = first_token_lowercase(&normalized);
     let lower = normalized.to_ascii_lowercase();
     let line_count = normalized.lines().count();
+
+    // ── App Detection via URL / Domain / Source ─────────────────────────
+    if lower.contains("youtube.com") || lower.contains("youtu.be") {
+        add_score(&mut scores, "YouTube", 0.99);
+    } else if lower.contains("github.com") {
+        add_score(&mut scores, "GitHub", 0.99);
+    } else if lower.contains("twitter.com") || lower.contains("x.com") {
+        add_score(&mut scores, "X / Twitter", 0.99);
+    } else if lower.contains("reddit.com") {
+        add_score(&mut scores, "Reddit", 0.99);
+    } else if lower.contains("linkedin.com") {
+        add_score(&mut scores, "LinkedIn", 0.99);
+    }
 
     // ── DevOps / Containers ────────────────────────────────────────────
     if starts_with_any(&first, &["docker", "docker-compose"]) {

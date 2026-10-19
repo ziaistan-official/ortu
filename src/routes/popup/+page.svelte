@@ -140,6 +140,18 @@
     }
   }
 
+  async function minimizePopup() {
+    try { await invoke("minimize_popup_window"); } catch (e) { console.error(e); }
+  }
+
+  async function maximizePopup() {
+    try { await invoke("maximize_popup_window"); } catch (e) { console.error(e); }
+  }
+
+  async function closePopup() {
+    try { await invoke("close_window", { label: "popup" }); } catch (e) { console.error(e); }
+  }
+
   async function addToGroup(itemId: number, groupName: string) {
     await invoke("add_to_group", { itemId, groupName });
     showGroupSelector = null;
@@ -326,6 +338,21 @@
   class="popup-shell flex flex-col h-screen bg-app/[0.97] text-fg overflow-hidden border border-overlay/[0.08] relative"
   style="backdrop-filter: blur(24px);"
 >
+
+  <!-- ── Popup Header Controls (Minimize / Maximize / Close) ───────────── -->
+  <div class="flex items-center justify-between px-3 py-1.5 border-b border-overlay/[0.06] bg-app/[0.8] shrink-0 select-none">
+    <div class="flex items-center gap-1.5">
+      <button class="w-2.5 h-2.5 rounded-full bg-red-500/80 cursor-pointer hover:opacity-80 border-none p-0" onclick={closePopup} onkeydown={(e) => e.key === 'Enter' && closePopup()} title="Close" aria-label="Close popup"></button>
+      <button class="w-2.5 h-2.5 rounded-full bg-amber-500/80 cursor-pointer hover:opacity-80 border-none p-0" onclick={minimizePopup} onkeydown={(e) => e.key === 'Enter' && minimizePopup()} title="Minimize" aria-label="Minimize popup"></button>
+      <button class="w-2.5 h-2.5 rounded-full bg-green-500/80 cursor-pointer hover:opacity-80 border-none p-0" onclick={maximizePopup} onkeydown={(e) => e.key === 'Enter' && maximizePopup()} title="Maximize" aria-label="Maximize popup"></button>
+    </div>
+    <span class="text-[10px] font-semibold tracking-wider uppercase text-fg/35">Ortu Popup</span>
+    <div class="flex items-center gap-1 text-fg/40 text-[11px]">
+      <button onclick={minimizePopup} class="px-1.5 py-0.5 hover:bg-overlay/[0.1] rounded text-[12px]" title="Minimize">—</button>
+      <button onclick={maximizePopup} class="px-1.5 py-0.5 hover:bg-overlay/[0.1] rounded text-[12px]" title="Maximize">□</button>
+      <button onclick={closePopup} class="px-1.5 py-0.5 hover:bg-red-500/20 hover:text-red-400 rounded text-[12px]" title="Close">✕</button>
+    </div>
+  </div>
 
   <!-- ── Search header ───────────────────────────── -->
   <div class="flex items-center gap-2.5 px-3.5 border-b border-overlay/[0.06] bg-app/[0.6] shrink-0" style="min-height: 48px;">
