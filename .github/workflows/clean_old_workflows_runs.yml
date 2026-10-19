@@ -1,0 +1,161 @@
+name: Cleanup All Workflow Runs
+
+on:
+  workflow_dispatch:
+    inputs:
+      days_to_keep:
+        description: 'Keep runs from last X days (0 = delete all)'
+        required: false
+        default: '0'
+        type: string
+      batch_size:
+        description: 'Number of runs to delete per batch (lower = more stable)'
+        required: false
+        default: '50'
+        type: string
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    
+    steps:
+      - name: Delete workflow runs in batches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          DAYS_TO_KEEP: ${{ github.event.inputs.days_to_keep || '0' }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size || '50' }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          set +e  # Don't exit on error
+          
+          echo "🧹 Starting cleanup of workflow runs..."
+          echo "Repository: $REPO"
+          echo "Days to keep: $DAYS_TO_KEEP"
+          echo "Batch size: $BATCH_SIZE"
+          echo "Current run ID (will be skipped): $CURRENT_RUN_ID"
+          echo ""
+          
+          # Calculate cutoff date
+          if [ "$DAYS_TO_KEEP" -gt 0 ]; then
+            cutoff_date=$(date -d "$DAYS_TO_KEEP days ago" -u +"%Y-%m-%dT%H:%M:%SZ")
+            echo "Cutoff date: $cutoff_date"
+          else
+            cutoff_date=""
+            echo "Deleting ALL workflow runs"
+          fi
+          echo ""
+          
+          total_deleted=0
+          page=1
+          
+          while true; do
+            echo "📥 Fetching page $page..."
+            
+            # Fetch runs with proper error handling
+            if [ -z "$cutoff_date" ]; then
+              # Delete all runs
+              runs=$(gh api \
+                -H "Accept: application/vnd.github+json" \
+                "/repos/$REPO/actions/runs?per_page=$BATCH_SIZE&page=$page" \
+                --jq '.workflow_runs[].id' 2>&1)
+            else
+              # Delete runs older than cutoff date
+              runs=$(gh api \
+                -H "Accept: application/vnd.github+json" \
+                "/repos/$REPO/actions/runs?per_page=$BATCH_SIZE&page=$page" \
+                --jq ".workflow_runs[] | select(.created_at < \"$cutoff_date\") | .id" 2>&1)
+            fi
+            
+            # Check if we got an error
+            if echo "$runs" | grep -q "HTTP 502"; then
+              echo "⚠️  GitHub API returned 502 error. Waiting 30 seconds and retrying..."
+              sleep 30
+              continue
+            fi
+            
+            # Check if no runs found
+            if [ -z "$runs" ] || [ "$runs" = "" ]; then
+              echo "✅ No more runs to delete"
+              break
+            fi
+            
+            # Count runs in this batch
+            run_count=$(echo "$runs" | wc -l)
+            echo "Found $run_count run(s) to delete"
+            
+            # Delete each run
+            deleted_in_batch=0
+            skipped_in_batch=0
+            
+            for run_id in $runs; do
+              # Skip the current run
+              if [ "$run_id" = "$CURRENT_RUN_ID" ]; then
+                echo "  Skipping current run $run_id (this workflow)"
+                skipped_in_batch=$((skipped_in_batch + 1))
+                continue
+              fi
+              
+              echo -n "  Deleting run $run_id... "
+              
+              # Try to delete with retry logic
+              retry_count=0
+              max_retries=3
+              
+              while [ $retry_count -lt $max_retries ]; do
+                delete_result=$(gh api \
+                  --method DELETE \
+                  -H "Accept: application/vnd.github+json" \
+                  "/repos/$REPO/actions/runs/$run_id" 2>&1)
+                
+                exit_code=$?
+                
+                if [ $exit_code -eq 0 ]; then
+                  echo "✓"
+                  deleted_in_batch=$((deleted_in_batch + 1))
+                  total_deleted=$((total_deleted + 1))
+                  break
+                elif echo "$delete_result" | grep -q "HTTP 502\|HTTP 503"; then
+                  retry_count=$((retry_count + 1))
+                  echo -n "(retry $retry_count/$max_retries) "
+                  sleep 5
+                elif echo "$delete_result" | grep -q "HTTP 403\|HTTP 404"; then
+                  echo "✗ (no permission or not found)"
+                  skipped_in_batch=$((skipped_in_batch + 1))
+                  break
+                else
+                  echo "✗ (error: $delete_result)"
+                  skipped_in_batch=$((skipped_in_batch + 1))
+                  break
+                fi
+              done
+              
+              # Small delay to avoid rate limiting
+              sleep 0.5
+            done
+            
+            echo "Deleted $deleted_in_batch run(s) from this batch"
+            if [ $skipped_in_batch -gt 0 ]; then
+              echo "Skipped $skipped_in_batch run(s) from this batch"
+            fi
+            echo ""
+            
+            # If we deleted fewer runs than batch size, we're done
+            if [ $run_count -lt $BATCH_SIZE ]; then
+              break
+            fi
+            
+            page=$((page + 1))
+            
+            # Safety delay between batches
+            sleep 2
+          done
+          
+          echo ""
+          echo "================================================"
+          echo "✅ Cleanup completed!"
+          echo "Total runs deleted: $total_deleted"
+          echo "================================================"
